@@ -8,31 +8,27 @@ use std::{
     time::Duration,
 };
 
+use openssl::{
+    pkey::Public,
+    rsa::{Padding, Rsa},
+};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
-use rsa::{Pkcs1v15Encrypt, RsaPublicKey, pkcs8::DecodePublicKey};
 use tokio::{io::AsyncWriteExt, net::TcpSocket, sync::Semaphore};
 
-use crate::{
-    Stats,
-    config::Config,
-    crypto::{CompatRng, format_pem},
-};
+use crate::{Stats, config::Config};
 
 static USERNAME_IDX: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     static RNG: RefCell<SmallRng> = RefCell::new(SmallRng::from_os_rng());
-    static PAYLOAD_BUFFER: RefCell<String> = RefCell::new(String::with_capacity(256));
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum VoteError {
     #[error("Encryption error: {0}")]
-    Encryption(#[from] rsa::errors::Error),
+    Encryption(#[from] openssl::error::ErrorStack),
     #[error("Network error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("Public key error: {0}")]
-    KeyParse(String),
     #[error("Config error: {0}")]
     Config(#[from] serde_json::Error),
     // #[error("Timeout")]
@@ -42,7 +38,7 @@ pub enum VoteError {
 }
 
 pub struct VoteContext {
-    public_key: RsaPublicKey,
+    public_key: Rsa<Public>,
     pub addr: SocketAddr,
     pub site: String,
     pub usernames: Vec<String>,
@@ -51,12 +47,15 @@ pub struct VoteContext {
 impl VoteContext {
     pub fn new(config: Config, usernames: Vec<String>) -> Result<Self, VoteError> {
         let pem_string = format_pem(&config.votifier_key);
-        let public_key = RsaPublicKey::from_public_key_pem(&pem_string)
-            .map_err(|e| VoteError::KeyParse(e.to_string()))?;
+        let public_key = Rsa::public_key_from_pem(pem_string.as_bytes())?;
 
         let mut addrs = format!("{}:{}", config.votifier_host, config.votifier_port)
             .to_socket_addrs()
             .expect("Unable to parse socket address");
+
+        if addrs.len() > 1 {
+            println!("Found more than 1 socket address, this might be important!");
+        }
 
         let addr = addrs.next().expect("Unable to resolve socket address");
 
@@ -81,20 +80,37 @@ pub async fn process_vote(ctx: &VoteContext, stats: &Stats) {
     let idx = USERNAME_IDX.fetch_add(1, Ordering::Relaxed);
     let username = unsafe { ctx.usernames.get_unchecked(idx % ctx.usernames.len()) };
 
-    let result = PAYLOAD_BUFFER.with(|buf| {
-        let mut buf = buf.borrow_mut();
-        make_payload(&ctx.site, username, &mut buf);
-        RNG.with(|rng| {
-            let mut rng = rng.borrow_mut();
-            let mut compat = CompatRng(&mut *rng);
-            ctx.public_key
-                .encrypt(&mut compat, Pkcs1v15Encrypt, buf.as_bytes())
-        })
-    });
+    let mut payload_buf = [0u8; 256];
+    let payload_len: usize;
+
+    {
+        let mut cursor = std::io::Cursor::new(&mut payload_buf[..]);
+        let suffix: u32 = RNG.with(|rng| rng.borrow_mut().random());
+
+        use std::io::Write;
+
+        let _ = write!(
+            cursor,
+            "VOTE\n{}-{:x}\n{}\n127.0.0.1\n1234567890\n",
+            ctx.site, suffix, username
+        );
+
+        payload_len = cursor.position() as usize;
+    }
+
+    let mut encrypted_buf = [0u8; 256];
+
+    let result = ctx.public_key.public_encrypt(
+        &payload_buf[..payload_len],
+        &mut encrypted_buf,
+        Padding::PKCS1,
+    );
 
     match result {
-        Ok(encrypted) => {
-            if (execute_vote_transaction(ctx, &encrypted).await).is_err() {
+        Ok(size) => {
+            let encrypted_bytes = &encrypted_buf[..size];
+
+            if (execute_vote_transaction(ctx, encrypted_bytes).await).is_err() {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
             } else {
                 stats.votes.fetch_add(1, Ordering::Relaxed);
@@ -132,19 +148,15 @@ pub async fn execute_vote_transaction(
     Ok(())
 }
 
-pub fn make_payload(site: &str, username: &str, buf: &mut String) {
-    buf.clear();
+pub fn format_pem(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() + 64);
 
-    let suffix: u32 = RNG.with(|rng| rng.borrow_mut().random());
+    result.push_str("-----BEGIN PUBLIC KEY-----\n");
+    for chunk in input.as_bytes().chunks(64) {
+        result.push_str(std::str::from_utf8(chunk).unwrap());
+        result.push('\n');
+    }
 
-    // pre-calculate safe estimate to avoid re-allocation during write!
-    let size = 32 + site.len() + username.len();
-    let _ = buf.try_reserve(size);
-
-    use std::fmt::Write;
-    let _ = write!(
-        buf,
-        "VOTE\n{}-{:x}\n{}\n127.0.0.1\n1234567890\n",
-        site, suffix, username
-    );
+    result.push_str("-----END PUBLIC KEY-----\n");
+    result
 }

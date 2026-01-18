@@ -8,7 +8,6 @@ use crate::config::{load_config, load_usernames};
 use crate::vote::{VoteContext, VoteError, process_vote, spawn_vote_task};
 
 mod config;
-mod crypto;
 mod vote;
 
 #[global_allocator]
