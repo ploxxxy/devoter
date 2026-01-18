@@ -5,11 +5,12 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rsa::{Pkcs1v15Encrypt, RsaPublicKey, pkcs8::DecodePublicKey};
-use tokio::{io::AsyncWriteExt, net::TcpStream, sync::Semaphore};
+use tokio::{io::AsyncWriteExt, net::TcpSocket, sync::Semaphore};
 
 use crate::{
     Stats,
@@ -34,6 +35,10 @@ pub enum VoteError {
     KeyParse(String),
     #[error("Config error: {0}")]
     Config(#[from] serde_json::Error),
+    // #[error("Timeout")]
+    // Timeout,
+    // #[error("Network error: {0}")]
+    // Network(std::io::Error),
 }
 
 pub struct VoteContext {
@@ -74,7 +79,7 @@ pub fn spawn_vote_task(ctx: Arc<VoteContext>, stats: Arc<Stats>, sem: Arc<Semaph
 
 pub async fn process_vote(ctx: &VoteContext, stats: &Stats) {
     let idx = USERNAME_IDX.fetch_add(1, Ordering::Relaxed);
-    let username = &ctx.usernames[idx % ctx.usernames.len()];
+    let username = unsafe { ctx.usernames.get_unchecked(idx % ctx.usernames.len()) };
 
     let result = PAYLOAD_BUFFER.with(|buf| {
         let mut buf = buf.borrow_mut();
@@ -105,14 +110,24 @@ pub async fn execute_vote_transaction(
     ctx: &VoteContext,
     encrypted_bytes: &[u8],
 ) -> Result<(), VoteError> {
-    let mut stream = TcpStream::connect(&ctx.addr).await?;
-    stream.set_nodelay(true)?;
+    let socket = if ctx.addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
 
-    // might have to read the buffer for (some?) votifier plugins to accept the payload
-    // let mut buffer = [0u8; 32];
-    // let _n = stream.read_exact(&mut buffer).await?;
+    // create socket manually to set Linger BEFORE connect to prevent port exhaustion
+    #[allow(deprecated)]
+    socket.set_linger(Some(Duration::from_secs(0)))?;
+    socket.set_nodelay(true)?;
+
+    let mut stream = socket.connect(ctx.addr).await?;
 
     stream.write_all(encrypted_bytes).await?;
+
+    // wait until the server acknowledges the transaction
+    let mut buffer = [0u8; 1];
+    stream.peek(&mut buffer).await?;
 
     Ok(())
 }
@@ -121,6 +136,10 @@ pub fn make_payload(site: &str, username: &str, buf: &mut String) {
     buf.clear();
 
     let suffix: u32 = RNG.with(|rng| rng.borrow_mut().random());
+
+    // pre-calculate safe estimate to avoid re-allocation during write!
+    let size = 32 + site.len() + username.len();
+    let _ = buf.try_reserve(size);
 
     use std::fmt::Write;
     let _ = write!(
