@@ -1,0 +1,8 @@
+{
+  "votifier_host": "127.0.0.1",
+  "votifier_port": 8192,
+  "votifier_key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAp0XGawGHgkdNLem0vtIzCrs4W0zvS1XgKAwL6lpqREXPIoaWUPgchGnhQ82hEOlSLefcqaoV284aIr7HVDobCnRgk5fawZiJwxuJdjfxnCq5xIMoOM1HwDPx0oGMhFLiKHi7zlrjeuIMrPvDnKXkrydSlHPfeXDP+Zv6Mm4Ia96aqFUL5tCLulFBdzHTT2Xewf5xjr32R5CTeZZl3EcR18yVZ9ES65UCZ7+NwsoaNzFc0qADdg06//p7PIKujZthKWLttA1VgXJDbvB5tQeUyK9vX0+mRSsJ6lWC9RXCIXWkKf8HlkCTP2S56iEj39VQtFXvol2vpOoDVrzANAMirQIDAQAB",
+  "site_name": "elite-employees-reward-system",
+  "rate": 0,
+  "max_connections": 50
+}
