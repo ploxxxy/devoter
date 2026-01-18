@@ -5,7 +5,7 @@ use tokio::sync::Semaphore;
 use tokio::time;
 
 use crate::config::{load_config, load_usernames};
-use crate::vote::{VoteContext, VoteError, process_vote, spawn_vote_task};
+use crate::vote::{VoteContext, VoteError, spawn_vote_task};
 
 mod config;
 mod vote;
@@ -83,6 +83,7 @@ async fn main() -> Result<(), VoteError> {
         }
     });
 
+    // acquire permit from semaphore before spawning vote task to respect max concurrency
     let semaphore = Arc::new(Semaphore::new(max_connections));
 
     if target_rate > 0 {
@@ -90,20 +91,14 @@ async fn main() -> Result<(), VoteError> {
         interval.set_missed_tick_behavior(time::MissedTickBehavior::Burst);
         loop {
             interval.tick().await;
-            spawn_vote_task(ctx.clone(), stats.clone(), semaphore.clone());
+
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            spawn_vote_task(permit, ctx.clone(), stats.clone());
         }
     } else {
         loop {
-            // acquire permit before spawning to respect max concurrency
             let permit = semaphore.clone().acquire_owned().await.unwrap();
-
-            let ctx_clone = ctx.clone();
-            let stats_clone = stats.clone();
-
-            tokio::spawn(async move {
-                process_vote(&ctx_clone, &stats_clone).await;
-                drop(permit);
-            });
+            spawn_vote_task(permit, ctx.clone(), stats.clone());
         }
     }
 }

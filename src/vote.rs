@@ -1,3 +1,8 @@
+use openssl::{
+    pkey::Public,
+    rsa::{Padding, Rsa},
+};
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     cell::RefCell,
     net::{SocketAddr, ToSocketAddrs},
@@ -7,13 +12,7 @@ use std::{
     },
     time::Duration,
 };
-
-use openssl::{
-    pkey::Public,
-    rsa::{Padding, Rsa},
-};
-use rand::{Rng, SeedableRng, rngs::SmallRng};
-use tokio::{io::AsyncWriteExt, net::TcpSocket, sync::Semaphore};
+use tokio::{io::AsyncWriteExt, net::TcpSocket, sync::OwnedSemaphorePermit};
 
 use crate::{Stats, config::Config};
 
@@ -68,11 +67,10 @@ impl VoteContext {
     }
 }
 
-pub fn spawn_vote_task(ctx: Arc<VoteContext>, stats: Arc<Stats>, sem: Arc<Semaphore>) {
+pub fn spawn_vote_task(permit: OwnedSemaphorePermit, ctx: Arc<VoteContext>, stats: Arc<Stats>) {
     tokio::spawn(async move {
-        if let Ok(_permit) = sem.acquire().await {
-            process_vote(&ctx, &stats).await;
-        }
+        process_vote(&ctx, &stats).await;
+        drop(permit);
     });
 }
 
