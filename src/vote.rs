@@ -1,8 +1,8 @@
+use fastrand::Rng;
 use openssl::{
     pkey::Public,
     rsa::{Padding, Rsa},
 };
-use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     cell::RefCell,
     net::{SocketAddr, ToSocketAddrs},
@@ -19,7 +19,7 @@ use crate::{Stats, config::Config};
 static USERNAME_IDX: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
-    static RNG: RefCell<SmallRng> = RefCell::new(SmallRng::from_os_rng());
+    static RNG: RefCell<Rng> = RefCell::new(Rng::new());
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -30,10 +30,6 @@ pub enum VoteError {
     Io(#[from] std::io::Error),
     #[error("Config error: {0}")]
     Config(#[from] serde_json::Error),
-    // #[error("Timeout")]
-    // Timeout,
-    // #[error("Network error: {0}")]
-    // Network(std::io::Error),
 }
 
 pub struct VoteContext {
@@ -76,14 +72,17 @@ pub fn spawn_vote_task(permit: OwnedSemaphorePermit, ctx: Arc<VoteContext>, stat
 
 pub async fn process_vote(ctx: &VoteContext, stats: &Stats) {
     let idx = USERNAME_IDX.fetch_add(1, Ordering::Relaxed);
-    let username = unsafe { ctx.usernames.get_unchecked(idx % ctx.usernames.len()) };
+    let username = unsafe {
+        ctx.usernames
+            .get_unchecked(idx.wrapping_rem(ctx.usernames.len()))
+    };
 
     let mut payload_buf = [0u8; 256];
     let payload_len: usize;
 
     {
         let mut cursor = std::io::Cursor::new(&mut payload_buf[..]);
-        let suffix: u32 = RNG.with(|rng| rng.borrow_mut().random());
+        let suffix: u32 = RNG.with(|rng| rng.borrow_mut().u32(..));
 
         use std::io::Write;
 
@@ -134,6 +133,8 @@ pub async fn execute_vote_transaction(
     #[allow(deprecated)]
     socket.set_linger(Some(Duration::from_secs(0)))?;
     socket.set_nodelay(true)?;
+    socket.set_keepalive(false)?;
+    socket.set_reuseaddr(true)?;
 
     let mut stream = socket.connect(ctx.addr).await?;
 

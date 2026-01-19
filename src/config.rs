@@ -26,9 +26,6 @@ pub fn load_config() -> Result<Config, VoteError> {
 
 #[derive(Debug, Deserialize)]
 struct ScannedPlayers {
-    // version: String,
-    // #[serde(rename = "exportedAt")]
-    // exported_at: u64,
     players: Vec<String>,
 }
 

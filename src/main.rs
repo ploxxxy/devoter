@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::Semaphore;
-use tokio::time;
+use tokio::{signal, time};
 
 use crate::config::{load_config, load_usernames};
 use crate::vote::{VoteContext, VoteError, spawn_vote_task};
@@ -86,19 +86,28 @@ async fn main() -> Result<(), VoteError> {
     // acquire permit from semaphore before spawning vote task to respect max concurrency
     let semaphore = Arc::new(Semaphore::new(max_connections));
 
-    if target_rate > 0 {
-        let mut interval = time::interval(Duration::from_millis(target_rate));
-        interval.set_missed_tick_behavior(time::MissedTickBehavior::Burst);
-        loop {
-            interval.tick().await;
+    tokio::select! {
+        _ = async {
+            let mut interval = if target_rate > 0 {
+                let mut i = time::interval(Duration::from_millis(target_rate));
+                i.set_missed_tick_behavior(time::MissedTickBehavior::Burst);
+                Some(i)
+            } else {
+                None
+            };
+            loop {
+                if let Some(interval) = &mut interval {
+                    interval.tick().await;
+                }
+                let permit = semaphore.clone().acquire_owned().await.unwrap();
+                spawn_vote_task(permit, ctx.clone(), stats.clone());
+            }
+        } => {}, // This branch runs the infinite loop
 
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            spawn_vote_task(permit, ctx.clone(), stats.clone());
-        }
-    } else {
-        loop {
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            spawn_vote_task(permit, ctx.clone(), stats.clone());
+        _ = signal::ctrl_c() => {
+            println!("\nShutting down...");
         }
     }
+
+    Ok(())
 }
